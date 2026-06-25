@@ -1308,6 +1308,31 @@ public:
     return addExternalSymbol(SSP->intern(Name), Size, IsWeaklyReferenced);
   }
 
+  /// Rename an external symbol.
+  ///
+  /// Clients should use this rather than Symbol::setName for external symbols
+  /// to keep the LinkGraph's external symbol lookup map consistent.
+  void renameExternalSymbol(Symbol &Sym, orc::SymbolStringPtr Name) {
+    assert(Sym.isExternal() && "Sym is not an external symbol");
+    assert(Name && "External symbol name cannot be empty");
+    auto OldName = orc::NonOwningSymbolStringPtr(Sym.getName());
+    auto NewName = orc::NonOwningSymbolStringPtr(Name);
+    auto I = ExternalSymbols.find(OldName);
+    assert(I != ExternalSymbols.end() && "Symbol is not in the externals set");
+    assert(I->second == &Sym && "External symbol map entry points elsewhere");
+    if (OldName == NewName)
+      return;
+    assert(!ExternalSymbols.contains(NewName) && "Duplicate external symbol");
+    ExternalSymbols.erase(I);
+    Sym.setName(std::move(Name));
+    ExternalSymbols.insert(
+        {orc::NonOwningSymbolStringPtr(Sym.getName()), &Sym});
+  }
+
+  void renameExternalSymbol(Symbol &Sym, StringRef Name) {
+    renameExternalSymbol(Sym, SSP->intern(Name));
+  }
+
   /// Add an absolute symbol.
   Symbol &addAbsoluteSymbol(orc::SymbolStringPtr Name,
                             orc::ExecutorAddr Address,

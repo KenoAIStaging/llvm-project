@@ -322,6 +322,29 @@ TEST(LinkGraphTest, FindSymbolsByName) {
   EXPECT_EQ(G.findAbsoluteSymbolByName(Qux), nullptr);
 }
 
+TEST(LinkGraphTest, RenameExternalSymbol) {
+  LinkGraph G("foo", std::make_shared<orc::SymbolStringPool>(),
+              Triple("x86_64-apple-darwin"), SubtargetFeatures(),
+              getGenericEdgeKindName);
+
+  auto Foo = G.intern("foo");
+  auto Bar = G.intern("bar");
+  auto &FooSym = G.addExternalSymbol(Foo, 0, false);
+
+  G.renameExternalSymbol(FooSym, Bar);
+
+  EXPECT_EQ(FooSym.getName(), Bar);
+  EXPECT_EQ(G.findExternalSymbolByName(Foo), nullptr);
+  EXPECT_EQ(G.findExternalSymbolByName(Bar), &FooSym);
+  EXPECT_EQ(
+      std::distance(G.external_symbols().begin(), G.external_symbols().end()),
+      1U)
+      << "Unexpected number of external symbols";
+
+  G.removeExternalSymbol(FooSym);
+  EXPECT_TRUE(G.external_symbols().empty());
+}
+
 TEST(LinkGraphTest, MakeExternal) {
   // Check that we can make defined and absolute symbols external.
   LinkGraph G("foo", std::make_shared<orc::SymbolStringPool>(),
