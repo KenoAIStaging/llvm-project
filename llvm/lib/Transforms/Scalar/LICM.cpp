@@ -2357,6 +2357,53 @@ static bool noConflictingReadWrites(Instruction *I, MemorySSA *MSSA,
   return true;
 }
 
+// A store with release ordering forbids moving program-order-earlier accesses
+// below it, so AA conservatively reports it as clobbering every location whose
+// object may be visible to other threads, even when the accessed addresses
+// cannot alias. It imposes no constraint on program-order-later reads of
+// unrelated memory, though: moving a load from after a release store to
+// before it is always legal. Since hoisting moves the load to a strictly
+// earlier program point, a release store whose location provably does not
+// alias the load is not a barrier to hoisting.
+//
+// Return true if every MemoryDef in the loop either is such a release store
+// or provably does not modify Loc, i.e. the walker's clobber verdict for a
+// load from Loc stems solely from release-store ordering. Note that this must
+// only be used when *hoisting* a load: sinking an access below a release
+// store is illegal, and the sink path below stays conservative. Monotonic and
+// unordered stores never clobber non-aliasing locations, and stronger
+// operations (seq_cst stores, ordered loads, cmpxchg, atomicrmw, fences) are
+// deliberately left as barriers.
+static bool onlyNonAliasingReleaseStoresBlockHoist(const MemoryLocation &Loc,
+                                                   Loop *CurLoop,
+                                                   MemorySSA &MSSA,
+                                                   BatchAAResults &BAA) {
+  bool SawReleaseStore = false;
+  for (BasicBlock *BB : CurLoop->getBlocks()) {
+    const auto *Defs = MSSA.getBlockDefs(BB);
+    if (!Defs)
+      continue;
+    for (const MemoryAccess &MA : *Defs) {
+      const auto *MD = dyn_cast<MemoryDef>(&MA);
+      if (!MD)
+        continue;
+      Instruction *DefI = MD->getMemoryInst();
+      if (auto *SI = dyn_cast<StoreInst>(DefI);
+          SI && SI->getOrdering() == AtomicOrdering::Release &&
+          !SI->isVolatile() &&
+          BAA.alias(MemoryLocation::get(SI), Loc) == AliasResult::NoAlias) {
+        SawReleaseStore = true;
+        continue;
+      }
+      if (isModSet(BAA.getModRefInfo(DefI, Loc)))
+        return false;
+    }
+  }
+  // If we saw no release store, the walker's verdict was not based on one;
+  // defer to it rather than overriding other sources of imprecision.
+  return SawReleaseStore;
+}
+
 static bool pointerInvalidatedByLoop(MemorySSA *MSSA, MemoryUse *MU,
                                      Loop *CurLoop, Instruction &I,
                                      SinkAndHoistLICMFlags &Flags,
@@ -2374,9 +2421,23 @@ static bool pointerInvalidatedByLoop(MemorySSA *MSSA, MemoryUse *MU,
 
     BatchAAResults BAA(MSSA->getAA());
     MemoryAccess *Source = getClobberingMemoryAccess(*MSSA, BAA, Flags, MU);
-    return !MSSA->isLiveOnEntryDef(Source) &&
-           CurLoop->contains(Source->getBlock()) &&
-           !(InvariantGroup && Source->getBlock() == CurLoop->getHeader() && isa<MemoryPhi>(Source));
+    bool Invalidated =
+        !MSSA->isLiveOnEntryDef(Source) &&
+        CurLoop->contains(Source->getBlock()) &&
+        !(InvariantGroup && Source->getBlock() == CurLoop->getHeader() &&
+          isa<MemoryPhi>(Source));
+
+    // The walker treats release stores as clobbers of any escaped location
+    // (see getSyncEffects), which blocks hoisting loads out of loops that
+    // publish unrelated data. Check whether release stores to non-aliasing
+    // memory are the only thing standing in the way; hoisting a load above
+    // them is legal.
+    if (Invalidated && !Flags.tooManyMemoryAccesses())
+      if (auto *LI = dyn_cast<LoadInst>(&I); LI && LI->isUnordered())
+        Invalidated = !onlyNonAliasingReleaseStoresBlockHoist(
+            MemoryLocation::get(LI), CurLoop, *MSSA, BAA);
+
+    return Invalidated;
   }
 
   // For sinking, we'd need to check all Defs below this use. The getClobbering
