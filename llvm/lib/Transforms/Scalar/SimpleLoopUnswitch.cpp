@@ -88,6 +88,12 @@ static cl::opt<bool> EnableNonTrivialUnswitch(
     cl::desc("Forcibly enables non-trivial loop unswitching rather than "
              "following the configuration passed into the pass."));
 
+static cl::opt<bool> UnswitchFirstIterationExitPHIs(
+    "unswitch-first-iteration-exit-phis", cl::init(true), cl::Hidden,
+    cl::desc("Allow trivial unswitching of branches whose loop-exit PHIs "
+             "observe loop header PHIs, by rewriting them to the header "
+             "PHIs' first-iteration (start) values."));
+
 static cl::opt<int>
     UnswitchThreshold("unswitch-threshold", cl::init(50), cl::Hidden,
                       cl::desc("The cost threshold for unswitching a loop."));
@@ -654,10 +660,33 @@ static bool unswitchTrivialBranch(Loop &L, CondBrInst &BI, DominatorTree &DT,
   }
   auto *ContinueBB = BI.getSuccessor(1 - LoopExitSuccIdx);
   auto *ParentBB = BI.getParent();
-  if (!ModifiedBranch &&
-      !areLoopExitPHIsLoopInvariant(L, *ParentBB, *LoopExitBB)) {
-    LLVM_DEBUG(dbgs() << "   Loop exit PHI's aren't loop-invariant!\n");
-    return false;
+
+  // Collect LCSSA PHI nodes in the exit block whose incoming value along the
+  // unswitched edge is not loop-invariant. Normally these prevent a trivial
+  // unswitch, but this branch executes unconditionally at the top of every
+  // iteration (it lies on the chain walked from the header by
+  // unswitchAllTrivialConditions), so a fully invariant condition can only
+  // ever take the exit on the *first* iteration. An incoming value that is a
+  // PHI in the loop header therefore always observes its start value along
+  // this edge; record such values to be rewritten to the start value once we
+  // commit to unswitching. This is only sound for a full unswitch: with a
+  // partially invariant condition the in-loop branch survives and its exit
+  // edge remains reachable on later iterations.
+  SmallVector<std::pair<PHINode *, Value *>, 4> ExitPHIRewrites;
+  if (!ModifiedBranch) {
+    for (PHINode &PN : LoopExitBB->phis()) {
+      Value *Incoming = PN.getIncomingValueForBlock(ParentBB);
+      if (L.isLoopInvariant(Incoming))
+        continue;
+      auto *HeaderPN = dyn_cast<PHINode>(Incoming);
+      if (!UnswitchFirstIterationExitPHIs || !FullUnswitch || !HeaderPN ||
+          HeaderPN->getParent() != L.getHeader()) {
+        LLVM_DEBUG(dbgs() << "   Loop exit PHI's aren't loop-invariant!\n");
+        return false;
+      }
+      ExitPHIRewrites.push_back(
+          {&PN, HeaderPN->getIncomingValueForBlock(L.getLoopPreheader())});
+    }
   }
 
   // When unswitching only part of the branch's condition, we need the exit
@@ -674,6 +703,12 @@ static bool unswitchTrivialBranch(Loop &L, CondBrInst &BI, DominatorTree &DT,
       return false;
     }
   }
+
+  // We are committed to unswitching now: rewrite the exit-block PHI inputs
+  // that observe first-iteration state (see above) to their start values, so
+  // that the unswitched (pre-loop) edge remains correct.
+  for (auto &[PN, StartValue] : ExitPHIRewrites)
+    PN->setIncomingValueForBlock(ParentBB, StartValue);
 
   LLVM_DEBUG({
     dbgs() << "    unswitching trivial invariant conditions for: " << BI
