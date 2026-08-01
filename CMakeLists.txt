@@ -606,6 +606,7 @@ if(LIBUV_BUILD_TESTS)
        test/test-poll-multiple-handles.c
        test/test-poll-oob.c
        test/test-poll.c
+       test/test-probe-max-write.c
        test/test-process-priority.c
        test/test-process-title-threadsafe.c
        test/test-process-title.c

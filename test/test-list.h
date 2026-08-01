@@ -108,6 +108,7 @@ TEST_DECLARE   (multiple_listen)
 #ifndef _WIN32
 TEST_DECLARE   (tcp_write_after_connect)
 #endif
+TEST_DECLARE   (probe_max_write)
 TEST_DECLARE   (tcp_writealot)
 TEST_DECLARE   (tcp_write_fail)
 TEST_DECLARE   (tcp_try_write)
@@ -699,6 +700,8 @@ TASK_LIST_START
 #ifndef _WIN32
   TEST_ENTRY  (tcp_write_after_connect)
 #endif
+
+  TEST_ENTRY_CUSTOM (probe_max_write, 0, 1, 300000)
 
 #ifdef __MVS__
   TEST_ENTRY_CUSTOM (tcp_writealot, 0, 0, 20000)
